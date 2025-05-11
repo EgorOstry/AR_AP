@@ -1,0 +1,7 @@
+numpy
+pandas
+pyodbc
+pywin32
+openpyxl
+sqlalchemy
+python-dotenv~=1.0.1
