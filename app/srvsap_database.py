@@ -12,5 +12,5 @@ Session = sessionmaker(bind=engine)
 
 
 # раздел подключения через pyodbc
-conn_str = f"DRIVER={{SQL Server Native Client 11.0}};SERVER={config.SAP_DB_HOST},{config.SAP_DB_PORT};DATABASE={config.SAP_DB_NAME};UID={config.SAP_DB_USER};PWD={config.SAP_DB_PASS}"
+conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={config.SAP_DB_HOST},{config.SAP_DB_PORT};DATABASE={config.SAP_DB_NAME};UID={config.SAP_DB_USER};PWD={config.SAP_DB_PASS}"
 conn = pyodbc.connect(conn_str)

@@ -64,6 +64,7 @@ SELECT
     s.ResponsibleDepartment_ID,
     s.ResponsibleDepartment_Name,
     s.is_offsets,
+    s.enforcement_proceedings,
     old.comment,
     CAST(GETDATE() as date) AS created_at
 FROM 
@@ -139,6 +140,7 @@ INSERT INTO dbo.ReceivablePayableBalanceReport
     ResponsibleDepartment_ID,
     ResponsibleDepartment_Name,
     is_offsets,
+    enforcement_proceedings,
     comment,
     created_at
 )
@@ -192,6 +194,7 @@ select
     ct2.ResponsibleDepartment_ID,
     ct2.ResponsibleDepartment_Name,
     ct2.is_offsets,
+    ct2.enforcement_proceedings,
     ct2.comment,
     ct2.created_at
 from
@@ -282,6 +285,7 @@ SELECT
     ResponsibleDepartment_ID,
     ResponsibleDepartment_Name,
     is_offsets,
+    enforcement_proceedings,
     comment,
     created_at
 FROM dbo.ReceivablePayableBalanceReport
@@ -289,13 +293,117 @@ WHERE created_at = CAST(GETDATE() as date)
 ;
 '''
 
+# select_from_dst_for_excels_backup = '''
+# with ct1 AS
+# (SELECT
+# 	PartnerID AS Контрагент_ID
+# 	,PartnerName AS Контрагент
+# 	,ContractID AS Договор_ID
+# 	,ContractName AS Договор
+# 	,COALESCE(ResponsibleByPartnerManagerBinding_Name, ResponsibleByTransport_Name, ResponsibleByContract_Name, ResponsibleByOrder_Name, ResponsibleByDoc_Name) AS Ответственный
+# 	,CONCAT(DocType, ' ', DocNumber, ' от ', FORMAT(DocDate, 'dd.MM.yyyy H:mm:ss')) AS "Документ расчета с контрагентом"
+# 	,CASE
+# 		WHEN DelayDays > 0 AND DelayDays <= 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END AS "<= 10 дней"
+# 	,CASE
+# 		WHEN DelayDays > 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END AS "> 10 дней"
+# 	,CASE
+# 		WHEN DelayDays > 0 AND DelayDays <= 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END
+# 	+
+# 	CASE
+# 		WHEN DelayDays > 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END AS Итог
+# 	,CASE
+# 		WHEN DebitCreditRubSum < 0 AND is_offsets = 1
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END AS "Сумма взаимозачетов"
+# 	,CASE
+# 		WHEN DelayDays > 0 AND DelayDays <= 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END
+# 	+
+# 	CASE
+# 		WHEN DelayDays > 10 AND DebitCreditRubSum > 0
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END
+# 	+
+# 	CASE
+# 		WHEN DebitCreditRubSum < 0 AND is_offsets = 1
+# 		THEN DebitCreditRubSum
+# 		ELSE 0
+# 	END AS "Итог с учетом взаимозачетов"
+# 	,comment AS "Актуальный комментарий"
+# 	,SUM(
+# 		CASE
+# 			WHEN DelayDays > 0 AND DelayDays <= 10 AND DebitCreditRubSum > 0
+# 			THEN DebitCreditRubSum
+# 			ELSE 0
+# 		END
+# 		+
+# 		CASE
+# 			WHEN DelayDays > 10 AND DebitCreditRubSum > 0
+# 			THEN DebitCreditRubSum
+# 			ELSE 0
+# 		END
+# 		+
+# 		CASE
+# 			WHEN DebitCreditRubSum < 0 AND is_offsets = 1
+# 			THEN DebitCreditRubSum
+# 			ELSE 0
+# 		END
+# 	) OVER (PARTITION BY PartnerID, COALESCE(ResponsibleByPartnerManagerBinding_Code, ResponsibleByTransport_Code, ResponsibleByContract_Code, ResponsibleByOrder_Code, ResponsibleByDoc_Code)) AS Summa
+# FROM
+# 	ReceivablePayableBalanceReport t1
+# WHERE
+# 	created_at = CAST(GETDATE() as date)
+# 	AND ((DebitCreditRubSum > 0 AND DelayDays > 0) OR (DebitCreditRubSum < 0 AND is_offsets = 1))
+# 	AND COALESCE(ResponsibleByPartnerManagerBinding_Directum_Sost, ResponsibleByTransport_Directum_Sost, ResponsibleByContract_Directum_Sost,ResponsibleByOrder_Directum_Sost, ResponsibleByDoc_Directum_Sost) <> 'З'
+# 	AND agency_factoring = 0
+# 	AND payment_on_sale = 0
+# 	AND enforcement_proceedings IS NULL
+# )
+# SELECT
+# 	Контрагент_ID
+# 	,Контрагент
+# 	,Договор_ID
+# 	,Договор
+# 	,Ответственный
+# 	,"Документ расчета с контрагентом"
+# 	,"<= 10 дней"
+# 	,"> 10 дней"
+# 	,Итог
+# 	,"Сумма взаимозачетов"
+# 	,"Итог с учетом взаимозачетов"
+# 	,"Актуальный комментарий"
+# FROM
+# 	ct1
+# WHERE
+# 	Summa > 0
+# ;
+# '''
 
+# в окно поля Summa добавили ContractType 2025-06-05
 select_from_dst_for_excels = '''
-SELECT 
+with ct1 AS
+(SELECT 
 	PartnerID AS Контрагент_ID
 	,PartnerName AS Контрагент
 	,ContractID AS Договор_ID
 	,ContractName AS Договор
+	,ContractType AS "Тип договора"
 	,COALESCE(ResponsibleByPartnerManagerBinding_Name, ResponsibleByTransport_Name, ResponsibleByContract_Name, ResponsibleByOrder_Name, ResponsibleByDoc_Name) AS Ответственный
 	,CONCAT(DocType, ' ', DocNumber, ' от ', FORMAT(DocDate, 'dd.MM.yyyy H:mm:ss')) AS "Документ расчета с контрагентом"
 	,CASE 
@@ -342,14 +450,54 @@ SELECT
 		ELSE 0
 	END AS "Итог с учетом взаимозачетов"
 	,comment AS "Актуальный комментарий"
+	,SUM(
+		CASE 
+			WHEN DelayDays > 0 AND DelayDays <= 10 AND DebitCreditRubSum > 0 
+			THEN DebitCreditRubSum
+			ELSE 0
+		END
+		+
+		CASE 
+			WHEN DelayDays > 10 AND DebitCreditRubSum > 0 
+			THEN DebitCreditRubSum
+			ELSE 0
+		END
+		+
+		CASE 
+			WHEN DebitCreditRubSum < 0 AND is_offsets = 1
+			THEN DebitCreditRubSum
+			ELSE 0
+		END
+	) OVER (PARTITION BY PartnerID, ContractType,  COALESCE(ResponsibleByPartnerManagerBinding_Code, ResponsibleByTransport_Code, ResponsibleByContract_Code, ResponsibleByOrder_Code, ResponsibleByDoc_Code)) AS Summa
 FROM 
 	ReceivablePayableBalanceReport t1
 WHERE 
-	created_at = CAST(GETDATE() as date) 
+	created_at = CAST(GETDATE() as date)
 	AND ((DebitCreditRubSum > 0 AND DelayDays > 0) OR (DebitCreditRubSum < 0 AND is_offsets = 1)) 
 	AND COALESCE(ResponsibleByPartnerManagerBinding_Directum_Sost, ResponsibleByTransport_Directum_Sost, ResponsibleByContract_Directum_Sost,ResponsibleByOrder_Directum_Sost, ResponsibleByDoc_Directum_Sost) <> 'З'
 	AND agency_factoring = 0
 	AND payment_on_sale = 0
+	AND enforcement_proceedings IS NULL
+)
+SELECT 
+	Контрагент_ID
+	,Контрагент
+	,Договор_ID
+	,Договор
+	,"Тип договора"
+	,Ответственный
+	,"Документ расчета с контрагентом"
+	,"<= 10 дней"
+	,"> 10 дней"
+	,Итог
+	,"Сумма взаимозачетов"
+	,"Итог с учетом взаимозачетов"
+	,"Актуальный комментарий"
+FROM 
+	ct1
+WHERE 
+	Summa > 0
+;
 '''
 
 get_users_list = '''
@@ -362,13 +510,73 @@ Where
 ;
 '''
 
+# insert_task_id = '''
+# UPDATE ReceivablePayableBalanceReport
+# SET task_id = :task_id
+# WHERE
+#     created_at = CAST(GETDATE() AS Date)
+#     AND COALESCE(ResponsibleByPartnerManagerBinding_Directum_Code, ResponsibleByTransport_Directum_Code, ResponsibleByContract_Directum_Code, ResponsibleByOrder_Directum_Code, ResponsibleByDoc_Directum_Code) = :user_code
+#     AND ((DebitCreditRubSum > 0 AND DelayDays > 0) OR (DebitCreditRubSum < 0 AND is_offsets = 1))
+#     AND (enforcement_proceedings is null
+# 	or agency_factoring = 0
+# 	or payment_on_sale  = 0)
+# ;
+# '''
+# ИСПРАВЛЕНИЕ 06.04.2025
 insert_task_id = '''
-UPDATE ReceivablePayableBalanceReport
+WITH CTE AS
+(
+    SELECT
+        task_id
+        ,SUM(
+            CASE 
+                WHEN DelayDays > 0 AND DebitCreditRubSum > 0 
+                THEN DebitCreditRubSum 
+                ELSE 0 
+            END
+            +
+            CASE 
+                WHEN DebitCreditRubSum < 0 AND is_offsets = 1 
+                THEN DebitCreditRubSum 
+                ELSE 0 
+            END
+        ) OVER (
+            PARTITION BY 
+                PartnerID, 
+                created_at, 
+                COALESCE(
+                    ResponsibleByPartnerManagerBinding_Code,
+                    ResponsibleByTransport_Code,
+                    ResponsibleByContract_Code,
+                    ResponsibleByOrder_Code,
+                    ResponsibleByDoc_Code
+                )
+        ) AS SummaGroup
+    FROM
+        ReceivablePayableBalanceReport
+    WHERE
+        created_at = CAST(GETDATE() AS date)
+        AND COALESCE(
+            ResponsibleByPartnerManagerBinding_Directum_Code,
+            ResponsibleByTransport_Directum_Code,
+            ResponsibleByContract_Directum_Code,
+            ResponsibleByOrder_Directum_Code,
+            ResponsibleByDoc_Directum_Code
+        ) = :user_code
+        AND (
+            (DebitCreditRubSum > 0 AND DelayDays > 0)
+            OR (DebitCreditRubSum < 0 AND is_offsets = 1)
+        )
+        AND
+        (
+            enforcement_proceedings IS NULL
+            AND agency_factoring = 0
+            AND payment_on_sale = 0
+        )
+)
+UPDATE CTE
 SET task_id = :task_id
-WHERE
-    created_at = CAST(GETDATE() AS Date)
-    AND COALESCE(ResponsibleByPartnerManagerBinding_Directum_Code, ResponsibleByTransport_Directum_Code, ResponsibleByContract_Directum_Code, ResponsibleByOrder_Directum_Code, ResponsibleByDoc_Directum_Code) = :user_code
-    AND ((DebitCreditRubSum > 0 AND DelayDays > 0) OR (DebitCreditRubSum < 0 AND is_offsets = 1))
+WHERE SummaGroup > 0
 ;
 '''
 
@@ -398,8 +606,10 @@ FROM ReceivablePayableBalanceReport rp
 LEFT JOIN ReceivablePayableBalanceReportCommentsStage cs ON 
     COALESCE(rp.ResponsibleByPartnerManagerBinding_Directum_Code, rp.ResponsibleByTransport_Directum_Code, rp.ResponsibleByContract_Directum_Code, rp.ResponsibleByOrder_Directum_Code, rp.ResponsibleByDoc_Directum_Code) = cs.UserCode
     AND rp.PartnerName = cs.PartnerName
+    AND rp.ContractType = cs.ContractType
 WHERE
     rp.created_at = (SELECT MAX(created_at) FROM ReceivablePayableBalanceReport)
+    and rp.task_id is not null
 '''
 
 truncate_mapping = '''

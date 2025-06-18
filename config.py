@@ -34,6 +34,8 @@ csv_exp_imp_dir = os.getenv("CSV_EXP_IMP_DIR")
 export_to_csv_query_dir = os.getenv("EXP_TO_CSV_QUERY_DIR")
 
 sql_query_file = os.path.join(export_to_csv_query_dir, "select_from_upp.sql")
+sql_query_file_specific_users = os.path.join(export_to_csv_query_dir, "select_from_upp_specific_users.sql")
+
 csv_data = os.path.join(csv_exp_imp_dir, "data.csv")
 
 stage_table_name = os.getenv("DST_STAGE_NAME")
@@ -45,6 +47,19 @@ exp_to_csv_sqlcmd_command = [
     "-P", UPP_DB_PASS,
     "-d", UPP_DB_NAME,
     "-i", sql_query_file,  # SQL-запрос
+    "-s", ",",  # Разделитель - запятая (CSV)
+    "-W",
+    "-f", "65001",  # UTF-8
+    "-o", csv_data  # Выходной CSV файл
+]
+
+exp_to_csv_sqlcmd_command_specific_users = [
+    "sqlcmd",
+    "-S", f"{UPP_DB_HOST},{UPP_DB_PORT}",
+    "-U", UPP_DB_USER,
+    "-P", UPP_DB_PASS,
+    "-d", UPP_DB_NAME,
+    "-i", sql_query_file_specific_users,  # SQL-запрос
     "-s", ",",  # Разделитель - запятая (CSV)
     "-W",
     "-f", "65001",  # UTF-8

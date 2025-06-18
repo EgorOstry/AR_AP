@@ -1,5 +1,6 @@
 import os
 import uuid
+import random
 import config
 import openpyxl
 import datetime
@@ -9,6 +10,7 @@ import pandas as pd
 import win32com.client
 from sqlalchemy import text
 from app.logger import logger
+from typing import Optional, List
 from datetime import datetime, date
 from app.logger_decorator import log_dec
 from app.logger_context_manager import time_logger
@@ -33,9 +35,39 @@ from app.queries import (
 
 class Basic_procedure_methods:
 
-    def __init__(self, excel_reports_path, export_register_to_csv_path):
+    def __init__(
+            self
+            ,excel_reports_path
+            ,export_register_to_csv_path
+            ,without_dir_reports:bool = False
+            ,upp_users_codes_list:Optional[List[str]]=None
+            ,manual_dir_subject_text:str=None
+            ,manual_dir_body_text:str=None
+    ):
+        if not isinstance(without_dir_reports, bool):
+            raise TypeError("without_dir_reports must be a bool")
+
+        if manual_dir_subject_text is not None and not isinstance(manual_dir_subject_text, str):
+            raise TypeError("manual_dir_subject_text must be an str or None")
+
+        if manual_dir_body_text is not None and not isinstance(manual_dir_body_text, str):
+            raise TypeError("manual_dir_body_text must be an str or None")
+
+        if upp_users_codes_list is not None and not isinstance(upp_users_codes_list, list):
+            raise TypeError("upp_users_codes_list must be a list or None")
+
+        if upp_users_codes_list:
+            for code in upp_users_codes_list:
+                if not isinstance(code, str):
+                    raise TypeError(f"Элемент списка upp_users_codes_list должен быть str, а не {type(code).__name__}")
+
         self.reports_path = excel_reports_path  # директория для excel отчетов
         self.export_register_to_csv_path = export_register_to_csv_path  # директория для первичного экспорта данных 1с->csv
+        self.without_dir_reports = without_dir_reports  # признак загрузки без формирования excel отчетов и отправки их в директум ответственным (только загрузка в бд)
+        self.upp_users_codes = ",".join(f"'{u}'" for u in upp_users_codes_list) if upp_users_codes_list else None  # коды ответственных для выборочной загрузки (коды обмена упп из справочника физ.лица)
+        self.manual_dir_subject_text = manual_dir_subject_text # ручной текст в тему задачи
+        self.manual_dir_body_text = manual_dir_body_text # ручной текст в тело задачи
+
 
     def exec_query(self, engine, query, params=None):
         # метод для выполнения insert, delete, truncate запросов через sqlalchemy
@@ -64,7 +96,6 @@ class Basic_procedure_methods:
         except Exception as e:
             raise
 
-
     def convert_to_uuid(self, value):
         # метод конвертирует bytes в привычный uuid
         if isinstance(value, bytes):  # Если значение в формате bytes
@@ -73,7 +104,6 @@ class Basic_procedure_methods:
             except Exception as e:
                 return None  # Если ошибка, возвращаем None
         return value  # Если это уже строка, оставляем как есть
-
 
     @log_dec
     def create_clean_dir(self, path):
@@ -110,7 +140,6 @@ class Basic_procedure_methods:
 
         return users_dict
 
-    
     def get_user_from_excel(self, file_name: str) -> str:
         # Метод получает ФИО из названия отчета Excel
         base_name = os.path.splitext(file_name)[0]
@@ -143,7 +172,7 @@ class TaskCreator(Basic_procedure_methods):
             self.exec_query(dst_engine, truncate_stage)
 
         # экспортируем данные из 1c в csv
-        self.sqlcmd_export()
+        self.sqlcmd_export(self.upp_users_codes)
 
         # готовим csv данные и запрос для импорта
         self.data_to_load, self.query = self.prepare_csv_data_to_import()
@@ -154,41 +183,49 @@ class TaskCreator(Basic_procedure_methods):
         # переносим в ReceivablePayableBalanceReport данные из ReceivablePayableBalanceReportStage вместе с кодами Directum
         with time_logger("load_from_stage_to_dst"):
             self.exec_query(dst_engine, load_from_stage_to_dst)
-        #
-        # формируем df из данных из ReceivablePayableBalanceReport c актуальными комментариями
-        with time_logger("select_from_dst_with_comments"):
-            self.df = self.fetch_query(dst_engine, select_from_dst_for_excels)
 
-        # создаем excel отчеты
-        self.create_reports(self.df)
+        if self.without_dir_reports is False:
+            # формируем df из данных из ReceivablePayableBalanceReport c актуальными комментариями
+            with time_logger("select_from_dst_with_comments"):
+                self.df = self.fetch_query(dst_engine, select_from_dst_for_excels)
 
-        # преобразовываем excel отчеты
-        self.transform_reports(self.reports_path)
+            # создаем excel отчеты
+            self.create_reports(self.df)
 
-        # создаем задачи в Directum, записываем ИД Задачи в dst таблицу
-        self.dir_procedure()
+            # преобразовываем excel отчеты
+            self.transform_reports(self.reports_path)
+
+            # создаем задачи в Directum, записываем ИД Задачи в dst таблицу
+            self.dir_procedure()
 
     @log_dec
-    def sqlcmd_export(self):
+    def sqlcmd_export(self, upp_users_codes:Optional[List[str]]=None):
         try:
             """Экспорт данных в CSV"""
-            sqlcmd_export = subprocess.run(config.exp_to_csv_sqlcmd_command, shell=True, text=True, capture_output=True)
-            
+            if upp_users_codes:
+                exp_to_csv_sqlcmd_command_with_upp_users_codes = config.exp_to_csv_sqlcmd_command_specific_users
+                exp_to_csv_sqlcmd_command_with_upp_users_codes.append("-v")
+                exp_to_csv_sqlcmd_command_with_upp_users_codes.append(f"upp_users_codes={upp_users_codes}")
+                sqlcmd_export = subprocess.run(exp_to_csv_sqlcmd_command_with_upp_users_codes, shell=True, text=True,
+                                               capture_output=True)
+            else:
+                sqlcmd_export = subprocess.run(config.exp_to_csv_sqlcmd_command, shell=True, text=True,
+                                               capture_output=True)
+
             if sqlcmd_export.returncode == 0:
                 logger.info(f"Successful data export from {config.UPP_DB_NAME} to {config.csv_data}")
                 if sqlcmd_export.stdout:
-                    logger.info(f"STDOUT:", sqlcmd_export.stdout)
+                    logger.info(f"STDOUT: %s", sqlcmd_export.stdout)
             else:
                 logger.info(f"Unsuccessful data export from {config.UPP_DB_NAME} to {config.csv_data}")
                 if sqlcmd_export.stderr:
-                    logger.info(f"STDERR:", sqlcmd_export.stderr)
+                    logger.info(f"STDERR: %s", sqlcmd_export.stderr)
 
         except Exception as e:
             logger.info(f"Unsuccessful data export from {config.UPP_DB_NAME} to {config.csv_data}")
             if sqlcmd_export.stderr:
-                logger.info(f"STDERR:", sqlcmd_export.stderr)
+                logger.info(f"STDERR: %s", sqlcmd_export.stderr)
             raise
-
 
     @log_dec
     def prepare_csv_data_to_import(self):
@@ -208,6 +245,7 @@ class TaskCreator(Basic_procedure_methods):
                 skiprows=[1]  # Пропускаем строку с прочерками
             )
 
+            df = df.replace({np.nan: None})
 
             # Вместо NULL в датафрейм встает пандасовский NaN, заменяем на питоновский None чтобы при вставке получился NULL
             df = df.where(pd.notna(df), None)
@@ -230,7 +268,6 @@ class TaskCreator(Basic_procedure_methods):
                 tuple(None if x == "None" else x for x in row)
                 for row in data
             ]
-
 
             # SQL-запрос для вставки
             columns = ", ".join(df.columns)
@@ -299,13 +336,13 @@ class TaskCreator(Basic_procedure_methods):
                 cursor.close()
                 conn.close()
 
-
     @log_dec
     def create_reports(self, df: pd.DataFrame):
         # Метод создает Excel таблицы по ответственным
 
         detail_columns = [
             "Контрагент",
+            "Тип договора",
             "Договор",
             "Документ расчета с контрагентом",
             "<= 10 дней",
@@ -314,7 +351,7 @@ class TaskCreator(Basic_procedure_methods):
         ]
 
         agg_df = (
-            df.groupby(["Ответственный", "Контрагент"], as_index=False)
+            df.groupby(["Ответственный", "Контрагент", "Тип договора"], as_index=False)
             .agg({
                 "<= 10 дней": "sum",
                 "> 10 дней": "sum",
@@ -326,12 +363,13 @@ class TaskCreator(Basic_procedure_methods):
         )
 
         # исключаем строки, которые после агрегации получают 0 с учетом взаимозачетов
-        # agg_df = agg_df[agg_df["Итог с учетом взаимозачетов"] != 0] #правки от 07.05.2025
+        # agg_df = agg_df[agg_df["Итог с учетом взаимозачетов"] != 0] #правки от 07.05.2025 Острый Е.А. согл. с Артеменковым М.П.
         agg_df = agg_df[agg_df["Итог с учетом взаимозачетов"] > 0]
 
         # Итоговый порядок столбцов (на первом листе)
         summary_columns = [
             "Контрагент",
+            "Тип договора",
             "<= 10 дней",
             "> 10 дней",
             "Итог",
@@ -363,6 +401,7 @@ class TaskCreator(Basic_procedure_methods):
             # Добавляем итого-строку
             summary_row = {}
             summary_row["Контрагент"] = "Итог"
+            summary_row["Тип договора"] = "Итог"
             summary_row["<= 10 дней"] = current_agg["<= 10 дней"].sum()
             summary_row["> 10 дней"] = current_agg["> 10 дней"].sum()
             summary_row["Итог"] = current_agg["Итог"].sum()
@@ -404,6 +443,7 @@ class TaskCreator(Basic_procedure_methods):
             # Добавляем итого-строку
             detail_summary = {}
             detail_summary["Контрагент"] = "Итог"
+            detail_summary["Тип договора"] = "Итог"
             detail_summary["Договор"] = "Итог"
             detail_summary["Документ расчета с контрагентом"] = "Итог"
             detail_summary["<= 10 дней"] = current_detail["<= 10 дней"].sum()
@@ -433,7 +473,6 @@ class TaskCreator(Basic_procedure_methods):
             filename = fr"{self.reports_path}\{responsible_name}_{current_date}.xlsx"
             workbook.save(filename)
 
-
     @log_dec
     def transform_reports(self, folder_path: str):
         """
@@ -446,7 +485,6 @@ class TaskCreator(Basic_procedure_methods):
         5. Добавляет границы вокруг ячеек.
         Применяет эти шаги ко всем листам рабочей книги.
         """
-
 
         columns_to_separate = [
             "<= 10 дней",
@@ -558,7 +596,6 @@ class TaskCreator(Basic_procedure_methods):
                 # Сохраняем изменения в файле
                 workbook.save(file_path)
 
-
     @log_dec
     def create_task(self, dir_conection, responsible_user_code, attachment_direcory):
         # Метод создает задачу и загружает во вложение Excel отчет
@@ -567,16 +604,18 @@ class TaskCreator(Basic_procedure_methods):
         login_point = win32com.client.Dispatch("SBLogon.LoginPoint")
 
         directum_app = login_point.GetApplication(dir_conection)
-        
+
         script = directum_app.ScriptFactory.GetObjectByName("ОтправитьТМАСЗ")
+
+        subject = config.task_subject if not self.manual_dir_subject_text else self.manual_dir_subject_text
+        body = config.task_body if not self.manual_dir_body_text else self.manual_dir_body_text
 
         # Передаём параметры в скрипт
         script.Params.Add("Инициатор", 'Д000086')  # dbo.MBAnalit.Kod Директум текст
-        script.Params.Add("Тема", config.task_subject)  # текст
-        script.Params.Add("Текст", config.task_body)  # текст
+        script.Params.Add("Тема", subject)  # текст
+        script.Params.Add("Текст", body)  # текст
         script.Params.Add("Ответственный", responsible_user_code)  # dbo.MBAnalit.Kod Директум текст
         script.Params.Add("Документ", attachment_direcory)  # путь к вложению
-
 
         result = script.Execute()  # ИД задачи
         return result
@@ -587,7 +626,6 @@ class TaskCreator(Basic_procedure_methods):
         # Получачет код ответственного
         # Создает задачу в directum и прикладывает excel
         # Записывает ИД созданной задачи в ReceivablePayableBalanceReport
-
 
         self.users_dict = self.get_users_dict()
 
@@ -616,11 +654,11 @@ class TaskCreator(Basic_procedure_methods):
                     self.exec_query(dst_engine, insert_mapping, {"task_id": task_id, "excel_report_name": file_name})
 
 
-
 class TaskProcessor(Basic_procedure_methods):
     '''
     Объект для извлечения данных из задач Directum и обновления БД комменатриями из excel отчетов
     '''
+
     def run(self):
 
         # очищаем (и если надо создаем) директорию reports_path
@@ -639,8 +677,6 @@ class TaskProcessor(Basic_procedure_methods):
         # вставляем комментарии в dst
         self.insert_comments()
 
-
-
     @log_dec
     def export_reports(self):
 
@@ -653,25 +689,22 @@ class TaskProcessor(Basic_procedure_methods):
             with time_logger(f"export report from task {task_id}"):
                 self.export_documents_from_task(task_id)
 
-
     @log_dec
     def export_documents_from_task(self, task_id):
         # метод по task_id извлекает вложения из Directum и сохраняет в директорию self.reports_path
 
         # Подключаемся к COM-объекту SBLogon.LoginPoint
         login_point = win32com.client.Dispatch("SBLogon.LoginPoint")
-        
+
         directum_app = login_point.GetApplication(dir_connection)
-        
+
         script = directum_app.ScriptFactory.GetObjectByName("ExportDocumentsFromTask")
 
         # Передаём параметры в скрипт
         script.Params.Add("TaskID", task_id)  # Идентификатор задачи
         script.Params.Add("Path", self.reports_path)  # Путь для сохранения документов
-        
 
         result = script.Execute()
-
 
     @log_dec
     def delete_invalid_reports(self):
@@ -696,7 +729,7 @@ class TaskProcessor(Basic_procedure_methods):
 
             # удаляем все после первого .xlsx, пока только в переменной new_filename
             xlsx_idx = filename.lower().index(".xlsx")
-            new_filename = filename[:xlsx_idx+5]
+            new_filename = filename[:xlsx_idx + 5]
 
             # если filename нет в valid_excel_names, то удаляем
             if new_filename not in valid_excel_names:
@@ -717,8 +750,6 @@ class TaskProcessor(Basic_procedure_methods):
             except Exception as e:
                 logger.info(f"error trying to export {filename} file")
                 os.remove(file_path)
-
-
 
     @log_dec
     def collect_comments(self):
@@ -754,14 +785,20 @@ class TaskProcessor(Basic_procedure_methods):
                 # Читаем только ПЕРВЫЙ лист (sheet_name=0)
                 df_excel = pd.read_excel(file_path, sheet_name=0)
 
-                # Проверка, что файл содержит колонки "Контрагент" и "Актуальный комментарий" на первом листе
-                if "Контрагент" not in df_excel.columns or "Актуальный комментарий" not in df_excel.columns:
+                # # Проверка, что файл содержит колонки "Контрагент" и "Актуальный комментарий" на первом листе
+                # if "Контрагент" not in df_excel.columns or "Актуальный комментарий" not in df_excel.columns:
+                #     # Если их нет, пропускаем файл
+                #     logger.warning(f"File {file_name} doesn't contain required columns")
+                #     continue
+                # ДОРАБОТКА  04.06.2025 - добавление ContractType
+                # Проверка, что файл содержит колонки "Контрагент", "Тип договора" и "Актуальный комментарий" на первом листе
+                if "Контрагент" not in df_excel.columns or "Актуальный комментарий" not in df_excel.columns or "Тип договора" not in df_excel.columns:
                     # Если их нет, пропускаем файл
                     logger.warning(f"File {file_name} doesn't contain required columns")
                     continue
 
                 # ДОРАБОТКА 13.04.2025 ПОСЛЕ ОШИБКИ 10.04.2025
-                # EXCEL ЧА*****ВОЙ ДАРЬИ СЧИТЫВАЛСЯ НЕКОРРЕКТНО - С ПУСТЫМИ СТРОКАМИ ПОСЛЕ СТРОКИ ИТОГ И ОДНОЙ ПУСТОЙ КОЛОНКОЙ В КОНЦЕ
+                # EXCEL ЧАЛИКОВОЙ ДАРЬИ СЧИТЫВАЛСЯ НЕКОРРЕКТНО - С ПУСТЫМИ СТРОКАМИ ПОСЛЕ СТРОКИ ИТОГ И ОДНОЙ ПУСТОЙ КОЛОНКОЙ В КОНЦЕ
                 # Фильтруем строки: оставляем только строки до первой строки, где в "Контрагент" записано "Итог"
                 if "Итог" in df_excel["Контрагент"].values:
                     # Определяем индекс первой строки, где Контрагент == "Итог"
@@ -774,7 +811,6 @@ class TaskProcessor(Basic_procedure_methods):
                     col_index = col_list.index("Актуальный комментарий")
                     df_excel = df_excel.iloc[:, :col_index + 1]
 
-
                 # Фильтруем ненужные строки
                 df_excel = df_excel.loc[
                     (df_excel["Контрагент"] != "Итог")  # & (прописать дополнительные условия)
@@ -783,20 +819,22 @@ class TaskProcessor(Basic_procedure_methods):
                 # Формируем список кортежей: (user_code, partner_name, comment)
                 for idx, row in df_excel.iterrows():
                     partner_name = row["Контрагент"]
+                    # ДОРАБОТКА  04.06.2025 - добавление ContractType
+                    contract_type = row["Тип договора"]
                     comment = row["Актуальный комментарий"]
 
-                    all_rows.append((user_code, partner_name, comment))
+                    all_rows.append((user_code, partner_name, contract_type, comment))
 
         # Создаём единый DataFrame
-        self.df_to_update_comments = pd.DataFrame(all_rows, columns=["UserCode", "PartnerName", "comment"])
+        self.df_to_update_comments = pd.DataFrame(all_rows,
+                                                  columns=["UserCode", "PartnerName", "ContractType", "comment"])
         # если не заполнено поле "Актуальный комментарий" то вместо nan ставим None чтобы в дальнейшем получился NULL
         self.df_to_update_comments["comment"] = self.df_to_update_comments["comment"].replace({np.nan: None})
-        
+
         # ДОРАБОТКА 13.04.2025 ПОСЛЕ ОШИБКИ 10.04.2025
-        # EXCEL ЧА*****ВОЙ ДАРЬИ СЧИТЫВАЛСЯ НЕКОРРЕКТНО - С ПУСТЫМИ СТРОКАМИ ПОСЛЕ СТРОКИ ИТОГ И ОДНОЙ ПУСТОЙ КОЛОНКОЙ В КОНЦЕ
+        # EXCEL ЧАЛИКОВОЙ ДАРЬИ СЧИТЫВАЛСЯ НЕКОРРЕКТНО - С ПУСТЫМИ СТРОКАМИ ПОСЛЕ СТРОКИ ИТОГ И ОДНОЙ ПУСТОЙ КОЛОНКОЙ В КОНЦЕ
         # еще раз убедимся, что в поле Контрагент нет nan значений
         self.df_to_update_comments = self.df_to_update_comments[self.df_to_update_comments["PartnerName"].notna()]
-
 
     @log_dec
     def insert_comments(self):
